@@ -177,6 +177,11 @@ contract LoanManager is ILoanManager, AccessControl, Pausable, ReentrancyGuard {
         _borrowerLoans[msg.sender].push(loanId);
 
         emit LoanRequested(loanId, msg.sender, amount, collateralAmount);
+
+        escrow.registerBorrower(loanId, msg.sender);
+        if (collateralAmount > 0) {
+            escrow.depositCollateral(loanId, msg.sender, collateralAmount);
+        }
     }
 
     /**
@@ -209,20 +214,27 @@ contract LoanManager is ILoanManager, AccessControl, Pausable, ReentrancyGuard {
         loanExists(loanId)
         inStatus(loanId, LoanStatus.REQUESTED)
         whenNotPaused
+        nonReentrant
     {
         if (msg.sender != address(governance) && !hasRole(OPERATOR_ROLE, msg.sender)) {
             revert UnauthorizedCaller(msg.sender);
         }
 
-        _loans[loanId].status = LoanStatus.REJECTED;
+        Loan storage loan = _loans[loanId];
+        loan.status = LoanStatus.REJECTED;
 
         emit LoanRejected(loanId, msg.sender);
+
+        if (loan.collateralAmount > 0) {
+            escrow.releaseCollateral(loanId, loan.borrower);
+        }
     }
 
     /**
      * @notice Activate an approved loan — funds are disbursed to borrower
      * @dev The lender calls this to fund the loan.
-     *      Requires: loan is APPROVED, approval not expired, escrow has funds
+     *      The lender's principal is deposited and disbursed atomically through escrow.
+     *      Requires: loan is APPROVED, approval not expired, and lender token approval.
      * @param loanId The loan to activate
      */
     function activateLoan(uint256 loanId)
@@ -241,6 +253,10 @@ contract LoanManager is ILoanManager, AccessControl, Pausable, ReentrancyGuard {
         }
 
         loan.lender = msg.sender;
+
+        escrow.depositLoanFunds(loanId, msg.sender, loan.principal);
+        escrow.disburseLoanFunds(loanId, loan.borrower);
+
         loan.status = LoanStatus.ACTIVE;
         loan.activationTime = block.timestamp;
         loan.repaymentDeadline = block.timestamp + loan.duration;
@@ -277,6 +293,9 @@ contract LoanManager is ILoanManager, AccessControl, Pausable, ReentrancyGuard {
             revert RepaymentExceedsOutstanding(amount, outstanding);
         }
 
+        escrow.receiveRepayment(loanId, loan.borrower, amount);
+        escrow.forwardRepaymentToLender(loanId, loan.lender, amount);
+
         loan.repaid += amount;
 
         emit LoanRepaid(loanId, amount, totalOwed - loan.repaid);
@@ -285,6 +304,10 @@ contract LoanManager is ILoanManager, AccessControl, Pausable, ReentrancyGuard {
         if (loan.repaid >= totalOwed) {
             loan.status = LoanStatus.REPAID;
             _activeLoanCount--;
+
+            if (loan.collateralAmount > 0) {
+                escrow.releaseCollateral(loanId, loan.borrower);
+            }
 
             if (address(reputation) != address(0)) {
                 reputation.recordRepayment(loan.borrower, loanId, loan.repaid);
@@ -303,6 +326,7 @@ contract LoanManager is ILoanManager, AccessControl, Pausable, ReentrancyGuard {
         loanExists(loanId)
         inStatus(loanId, LoanStatus.ACTIVE)
         whenNotPaused
+        nonReentrant
     {
         Loan storage loan = _loans[loanId];
 
@@ -313,27 +337,45 @@ contract LoanManager is ILoanManager, AccessControl, Pausable, ReentrancyGuard {
         loan.status = LoanStatus.DEFAULTED;
         _activeLoanCount--;
 
+        emit LoanDefaulted(loanId, block.timestamp);
+
+        if (loan.collateralAmount > 0) {
+            escrow.seizeCollateral(loanId);
+        }
+
         if (address(reputation) != address(0)) {
             reputation.recordDefault(loan.borrower, loanId);
         }
-
-        emit LoanDefaulted(loanId, block.timestamp);
     }
 
     /**
-     * @notice Cancel a loan request (borrower only, before approval)
+     * @notice Cancel a request before approval or an approved loan after approval expires
      * @param loanId The loan to cancel
      */
     function cancelLoan(uint256 loanId)
         external
         loanExists(loanId)
-        inStatus(loanId, LoanStatus.REQUESTED)
         onlyBorrower(loanId)
         whenNotPaused
+        nonReentrant
+        contractsConfigured
     {
-        _loans[loanId].status = LoanStatus.CANCELLED;
+        Loan storage loan = _loans[loanId];
+        if (loan.status == LoanStatus.APPROVED) {
+            if (block.timestamp <= loan.approvalTime + APPROVAL_EXPIRY) {
+                revert InvalidStateTransition(loanId, loan.status, LoanStatus.CANCELLED);
+            }
+        } else if (loan.status != LoanStatus.REQUESTED) {
+            revert InvalidStateTransition(loanId, loan.status, LoanStatus.CANCELLED);
+        }
+
+        loan.status = LoanStatus.CANCELLED;
 
         emit LoanCancelled(loanId, msg.sender);
+
+        if (loan.collateralAmount > 0) {
+            escrow.releaseCollateral(loanId, loan.borrower);
+        }
     }
 
     // ============================

@@ -74,10 +74,21 @@ contract LoanManagerTest is Test {
         governance.grantRole(governance.APPROVER_ROLE(), approver1);
         governance.grantRole(governance.APPROVER_ROLE(), approver2);
 
+        token.mint(borrower, 10_000 * 1e18);
+        token.mint(borrower2, 10_000 * 1e18);
+        token.mint(lender, 10_000 * 1e18);
+
         // Grant governance contract the ability to call approveLoan/rejectLoan
         // (governance address acts as caller via its submitApproval/rejectLoan)
 
         vm.stopPrank();
+
+        vm.prank(borrower);
+        token.approve(address(escrow), type(uint256).max);
+        vm.prank(borrower2);
+        token.approve(address(escrow), type(uint256).max);
+        vm.prank(lender);
+        token.approve(address(escrow), type(uint256).max);
     }
 
     // ============================
@@ -120,6 +131,8 @@ contract LoanManagerTest is Test {
     // ============================
 
     function test_RequestLoan_Success() public {
+        uint256 borrowerBalanceBefore = token.balanceOf(borrower);
+
         vm.expectEmit(true, true, false, true);
         emit LoanRequested(0, borrower, LOAN_AMOUNT, COLLATERAL_AMOUNT);
 
@@ -134,6 +147,19 @@ contract LoanManagerTest is Test {
         assertEq(loan.interestRateBps, INTEREST_BPS);
         assertEq(uint256(loan.status), uint256(ILoanManager.LoanStatus.REQUESTED));
         assertEq(loan.riskAssessmentHash, RISK_HASH);
+        assertEq(token.balanceOf(borrower), borrowerBalanceBefore - COLLATERAL_AMOUNT);
+        assertEq(escrow.getCollateralBalance(loanId), COLLATERAL_AMOUNT);
+    }
+
+    function test_RequestLoan_RevertWithoutBorrowerAllowance() public {
+        vm.prank(borrower);
+        token.approve(address(escrow), 0);
+        vm.prank(borrower);
+        vm.expectRevert();
+        loanManager.requestLoan(LOAN_AMOUNT, COLLATERAL_AMOUNT, DURATION, INTEREST_BPS, RISK_HASH);
+
+        assertEq(loanManager.getTotalLoans(), 0);
+        assertEq(token.balanceOf(address(escrow)), 0);
     }
 
     function test_RequestLoan_IncrementingIds() public {
@@ -195,6 +221,8 @@ contract LoanManagerTest is Test {
     // ============================
 
     function test_Lifecycle_FullRepayment() public {
+        uint256 borrowerBalanceBefore = token.balanceOf(borrower);
+        uint256 lenderBalanceBefore = token.balanceOf(lender);
         uint256 loanId = _requestLoan();
 
         // Approve
@@ -220,6 +248,32 @@ contract LoanManagerTest is Test {
 
         assertEq(uint256(loanManager.getLoanStatus(loanId)), uint256(ILoanManager.LoanStatus.REPAID));
         assertEq(loanManager.getActiveLoanCount(), 0);
+        assertEq(token.balanceOf(borrower), borrowerBalanceBefore - (totalOwed - LOAN_AMOUNT));
+        assertEq(token.balanceOf(lender), lenderBalanceBefore + (totalOwed - LOAN_AMOUNT));
+        assertEq(escrow.getCollateralBalance(loanId), 0);
+        assertEq(escrow.getLoanFundBalance(loanId), 0);
+        (,, uint256 repaymentBalance, bool collateralReleased, bool fundsDisbursed) =
+            escrow.getEscrowDetails(loanId);
+        assertEq(repaymentBalance, 0);
+        assertTrue(collateralReleased);
+        assertTrue(fundsDisbursed);
+    }
+
+    function test_Lifecycle_ZeroCollateralLoan() public {
+        vm.prank(borrower);
+        uint256 loanId = loanManager.requestLoan(LOAN_AMOUNT, 0, DURATION, INTEREST_BPS, RISK_HASH);
+        _approveLoan(loanId);
+        _activateLoan(loanId);
+
+        assertEq(token.balanceOf(borrower), 10_000 * 1e18 + LOAN_AMOUNT);
+        assertEq(escrow.getCollateralBalance(loanId), 0);
+
+        uint256 totalOwed = (LOAN_AMOUNT * (10000 + INTEREST_BPS)) / 10000;
+        vm.prank(borrower);
+        loanManager.repayLoan(loanId, totalOwed);
+
+        assertEq(uint256(loanManager.getLoanStatus(loanId)), uint256(ILoanManager.LoanStatus.REPAID));
+        assertEq(token.balanceOf(lender), 10_000 * 1e18 + (totalOwed - LOAN_AMOUNT));
     }
 
     // ============================
@@ -227,6 +281,7 @@ contract LoanManagerTest is Test {
     // ============================
 
     function test_Lifecycle_Rejection() public {
+        uint256 borrowerBalanceBefore = token.balanceOf(borrower);
         uint256 loanId = _requestLoan();
 
         vm.expectEmit(true, true, false, true);
@@ -236,6 +291,8 @@ contract LoanManagerTest is Test {
         loanManager.rejectLoan(loanId);
 
         assertEq(uint256(loanManager.getLoanStatus(loanId)), uint256(ILoanManager.LoanStatus.REJECTED));
+        assertEq(token.balanceOf(borrower), borrowerBalanceBefore);
+        assertEq(escrow.getCollateralBalance(loanId), 0);
     }
 
     // ============================
@@ -243,6 +300,7 @@ contract LoanManagerTest is Test {
     // ============================
 
     function test_Lifecycle_Cancellation() public {
+        uint256 borrowerBalanceBefore = token.balanceOf(borrower);
         uint256 loanId = _requestLoan();
 
         vm.expectEmit(true, true, false, true);
@@ -252,6 +310,8 @@ contract LoanManagerTest is Test {
         loanManager.cancelLoan(loanId);
 
         assertEq(uint256(loanManager.getLoanStatus(loanId)), uint256(ILoanManager.LoanStatus.CANCELLED));
+        assertEq(token.balanceOf(borrower), borrowerBalanceBefore);
+        assertEq(escrow.getCollateralBalance(loanId), 0);
     }
 
     function test_CancelLoan_RevertNotBorrower() public {
@@ -269,6 +329,7 @@ contract LoanManagerTest is Test {
     // ============================
 
     function test_Lifecycle_Default() public {
+        uint256 lenderBalanceBefore = token.balanceOf(lender);
         uint256 loanId = _createActiveLoan();
 
         ILoanManager.Loan memory loan = loanManager.getLoan(loanId);
@@ -284,6 +345,8 @@ contract LoanManagerTest is Test {
 
         assertEq(uint256(loanManager.getLoanStatus(loanId)), uint256(ILoanManager.LoanStatus.DEFAULTED));
         assertEq(loanManager.getActiveLoanCount(), 0);
+        assertEq(token.balanceOf(lender), lenderBalanceBefore - LOAN_AMOUNT + COLLATERAL_AMOUNT);
+        assertEq(escrow.getCollateralBalance(loanId), 0);
     }
 
     // ============================
@@ -390,6 +453,7 @@ contract LoanManagerTest is Test {
 
     function test_RepayLoan_PartialRepayment() public {
         uint256 loanId = _createActiveLoan();
+        uint256 lenderBalanceBefore = token.balanceOf(lender);
 
         uint256 totalOwed = (LOAN_AMOUNT * (10000 + INTEREST_BPS)) / 10000;
         uint256 partialAmount = totalOwed / 2;
@@ -405,6 +469,9 @@ contract LoanManagerTest is Test {
 
         uint256 remaining = loanManager.getOutstandingBalance(loanId);
         assertEq(remaining, totalOwed - partialAmount);
+        assertEq(token.balanceOf(lender), lenderBalanceBefore + partialAmount);
+        (,, uint256 repaymentBalance,,) = escrow.getEscrowDetails(loanId);
+        assertEq(repaymentBalance, 0);
     }
 
     function test_RepayLoan_MultiplePartialPayments() public {
@@ -560,6 +627,50 @@ contract LoanManagerTest is Test {
         loanManager.activateLoan(loanId);
 
         assertEq(uint256(loanManager.getLoanStatus(loanId)), uint256(ILoanManager.LoanStatus.ACTIVE));
+    }
+
+    function test_CancelLoan_ApprovedAfterExpiryReleasesCollateral() public {
+        uint256 borrowerBalanceBefore = token.balanceOf(borrower);
+        uint256 loanId = _requestLoan();
+        _approveLoan(loanId);
+        vm.warp(block.timestamp + loanManager.APPROVAL_EXPIRY() + 1);
+
+        vm.prank(borrower);
+        loanManager.cancelLoan(loanId);
+
+        assertEq(uint256(loanManager.getLoanStatus(loanId)), uint256(ILoanManager.LoanStatus.CANCELLED));
+        assertEq(token.balanceOf(borrower), borrowerBalanceBefore);
+        assertEq(escrow.getCollateralBalance(loanId), 0);
+    }
+
+    function test_ActivateLoan_RevertWithoutLenderAllowance() public {
+        uint256 loanId = _requestLoan();
+        _approveLoan(loanId);
+
+        vm.prank(lender);
+        token.approve(address(escrow), 0);
+        vm.prank(lender);
+        vm.expectRevert();
+        loanManager.activateLoan(loanId);
+
+        assertEq(uint256(loanManager.getLoanStatus(loanId)), uint256(ILoanManager.LoanStatus.APPROVED));
+        assertEq(token.balanceOf(address(escrow)), COLLATERAL_AMOUNT);
+    }
+
+    function test_RepayLoan_RevertWithoutBorrowerAllowance() public {
+        uint256 loanId = _createActiveLoan();
+        uint256 totalOwed = (LOAN_AMOUNT * (10000 + INTEREST_BPS)) / 10000;
+
+        vm.prank(borrower);
+        token.approve(address(escrow), 0);
+        vm.prank(borrower);
+        vm.expectRevert();
+        loanManager.repayLoan(loanId, totalOwed);
+
+        assertEq(uint256(loanManager.getLoanStatus(loanId)), uint256(ILoanManager.LoanStatus.ACTIVE));
+        assertEq(loanManager.getLoan(loanId).repaid, 0);
+        (,, uint256 repaymentBalance,,) = escrow.getEscrowDetails(loanId);
+        assertEq(repaymentBalance, 0);
     }
 
     // ============================
