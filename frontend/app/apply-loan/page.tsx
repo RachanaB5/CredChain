@@ -63,9 +63,18 @@ export default function ApplyLoanPage() {
     setLoadingAssessment(true);
     fetch(`${chainConfig.apiUrl}/api/credit/history/${address}`)
       .then((res) => (res.ok ? res.json() : []))
-      .then((data: PastAssessment[]) => {
-        if (data && data.length > 0) {
-          setRecentAssessment(data[0]);
+      .then((data: any) => {
+        const list: PastAssessment[] = Array.isArray(data) ? data : (data?.assessments || []);
+        if (list && list.length > 0) {
+          setRecentAssessment(list[0]);
+          // Adaptive terms based on risk tier
+          if (list[0].risk_category === "LOW") {
+            setInterestRateBps("300"); // 3%
+          } else if (list[0].risk_category === "MEDIUM") {
+            setInterestRateBps("500"); // 5%
+          } else {
+            setInterestRateBps("800"); // 8%
+          }
         } else {
           setRecentAssessment(null);
         }
@@ -78,13 +87,32 @@ export default function ApplyLoanPage() {
       .then((data) => {
         if (data && data.status) {
           setVerificationStatus(data.status);
+          // Adaptive collateral percentage based on verification standing
+          const amt = parseFloat(amount || "1000");
+          if (data.status === "SOURCE_VERIFIED") {
+            setCollateral((amt * 0.10).toFixed(0)); // 10% prime rate
+          } else if (data.status === "EVIDENCE_CHECKED") {
+            setCollateral((amt * 0.20).toFixed(0)); // 20% standard rate
+          } else if (data.status === "MANUAL_REVIEW") {
+            setCollateral((amt * 0.40).toFixed(0)); // 40% high risk
+          } else {
+            setCollateral((amt * 0.30).toFixed(0)); // 30% unverified
+          }
         }
       })
       .catch((e) => console.error("Error loading verification status:", e));
   }, [address]);
 
-  // Suggested collateral based on loan amount (20% minimum baseline or 150% LTV)
-  const suggestedCollateral = (parseFloat(amount || "0") * 0.2).toFixed(0);
+  // Suggested collateral dynamically adapted to verification standing and loan amount
+  const collateralFactor =
+    verificationStatus === "SOURCE_VERIFIED"
+      ? 0.10
+      : verificationStatus === "EVIDENCE_CHECKED"
+      ? 0.20
+      : verificationStatus === "MANUAL_REVIEW"
+      ? 0.40
+      : 0.30;
+  const suggestedCollateral = (parseFloat(amount || "0") * collateralFactor).toFixed(0);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

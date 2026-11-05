@@ -38,6 +38,12 @@ class CreditAssessment(Base):
     assessed_at = Column(String, nullable=True)            # ISO timestamp included in the hash
     assessment_hash = Column(String, nullable=True, index=True)  # 0x bytes32 committed on-chain
 
+    # Immutable version chain fields
+    previous_assessment_hash = Column(String, nullable=True)  # hash of the prior assessment (None if first)
+    assessment_version = Column(Integer, nullable=True, default=1)  # sequential version per borrower
+    on_chain_tx_hash = Column(String, nullable=True)       # blockchain tx hash when recorded on-chain
+    on_chain_status = Column(String, nullable=True, default="PENDING")  # PENDING / CONFIRMED / FAILED
+
 
 class LoanRecord(Base):
     """Tracks loan records linked to on-chain loan IDs."""

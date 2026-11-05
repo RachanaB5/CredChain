@@ -33,6 +33,10 @@ from app.services.prediction_service import (
     is_model_loaded,
     predict_risk,
 )
+from app.services.assessment_blockchain_service import (
+    anchor_assessment_on_chain,
+    verify_assessment_on_chain,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +195,21 @@ def assess_credit(
         "assessed_at": assessed_at,
     })
 
+    # Determine version chain: find the latest assessment for this borrower
+    latest_prev = (
+        db.query(CreditAssessment)
+        .filter(CreditAssessment.wallet_address == clean_wallet, CreditAssessment.assessment_hash.isnot(None))
+        .order_by(CreditAssessment.created_at.desc())
+        .first()
+    )
+    if latest_prev:
+        prev_hash = latest_prev.assessment_hash
+        prev_version = latest_prev.assessment_version or 1
+        new_version = prev_version + 1
+    else:
+        prev_hash = None
+        new_version = 1
+
     assessment = CreditAssessment(
         wallet_address=request.wallet_address.lower(),
         risk_score=float(final_risk_score),
@@ -206,6 +225,9 @@ def assess_credit(
         verification_adjustment=round(adjustment, 4),
         assessed_at=assessed_at,
         assessment_hash=assessment_hash,
+        previous_assessment_hash=prev_hash,
+        assessment_version=new_version,
+        on_chain_status="PENDING",
         created_at=now_utc,
     )
     db.add(assessment)
@@ -223,6 +245,28 @@ def assess_credit(
 
     db.commit()
     db.refresh(assessment)
+
+    # Automatically anchor assessment snapshot on-chain via AssessmentRegistry
+    on_chain_tx = None
+    on_chain_status = "PENDING"
+    try:
+        on_chain_tx = anchor_assessment_on_chain(
+            assessment_id=str(assessment.id),
+            borrower_address=request.wallet_address,
+            assessment_hash=assessment_hash,
+            previous_assessment_hash=prev_hash,
+            model_version=model_ver,
+            verification_status=verif_status,
+            risk_category=risk_category.value,
+        )
+        if on_chain_tx:
+            on_chain_status = "CONFIRMED"
+            assessment.on_chain_tx_hash = on_chain_tx
+            assessment.on_chain_status = on_chain_status
+            db.commit()
+            db.refresh(assessment)
+    except Exception as exc:
+        logger.warning("Could not auto-anchor assessment on-chain: %s", exc)
 
     declared_inc = bv.declared_annual_income
     declared_monthly = bv.declared_monthly_income
@@ -257,6 +301,10 @@ def assess_credit(
         requires_manual_review=req_manual,
         assessment_hash=assessment_hash,
         verification_record_hash=bv.record_hash,
+        previous_assessment_hash=prev_hash,
+        assessment_version=new_version,
+        on_chain_tx_hash=on_chain_tx,
+        on_chain_status=on_chain_status,
     )
 
 
@@ -284,6 +332,12 @@ def get_credit_history(
             created_at=a.created_at.isoformat() if a.created_at else "",
             verification_status=a.verification_status,
             assessment_hash=a.assessment_hash,
+            previous_assessment_hash=a.previous_assessment_hash,
+            assessment_version=a.assessment_version,
+            raw_risk_score=a.raw_risk_score,
+            verification_adjustment=a.verification_adjustment,
+            on_chain_tx_hash=getattr(a, 'on_chain_tx_hash', None),
+            on_chain_status=getattr(a, 'on_chain_status', None),
         )
         for a in assessments
     ]
@@ -317,3 +371,59 @@ def verify_assessment(
     current_status = bv.status if bv else "UNVERIFIED"
     current_record = bv.record_hash if bv else None
     return verify_assessment_row(row, current_status, current_record, onchain_hash)
+
+
+@router.post("/anchor/{assessment_id}")
+def anchor_assessment(
+    assessment_id: str,
+    db: Session = Depends(get_db),
+):
+    """Anchor an existing assessment record onto the blockchain AssessmentRegistry."""
+    row = db.query(CreditAssessment).filter(CreditAssessment.id == assessment_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Assessment not found.")
+
+    if not row.assessment_hash:
+        raise HTTPException(status_code=400, detail="Assessment missing assessment_hash.")
+
+    tx_hash = anchor_assessment_on_chain(
+        assessment_id=str(row.id),
+        borrower_address=row.wallet_address,
+        assessment_hash=row.assessment_hash,
+        previous_assessment_hash=row.previous_assessment_hash,
+        model_version=row.model_version or "1.0.0",
+        verification_status=row.verification_status or "UNVERIFIED",
+        risk_category=row.risk_category or "MEDIUM",
+    )
+
+    if not tx_hash:
+        raise HTTPException(status_code=500, detail="Failed to anchor assessment on blockchain.")
+
+    row.on_chain_tx_hash = tx_hash
+    row.on_chain_status = "CONFIRMED"
+    db.commit()
+    db.refresh(row)
+
+    return {
+        "assessment_id": str(row.id),
+        "assessment_hash": row.assessment_hash,
+        "on_chain_tx_hash": tx_hash,
+        "on_chain_status": "CONFIRMED",
+    }
+
+
+@router.get("/verify-onchain/{assessment_id}")
+def verify_assessment_onchain(
+    assessment_id: str,
+    db: Session = Depends(get_db),
+):
+    """Directly query the on-chain AssessmentRegistry contract to verify hash integrity."""
+    row = db.query(CreditAssessment).filter(CreditAssessment.id == assessment_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Assessment not found.")
+
+    if not row.assessment_hash:
+        raise HTTPException(status_code=400, detail="Assessment has no cryptographic hash.")
+
+    result = verify_assessment_on_chain(str(row.id), row.assessment_hash)
+    return result

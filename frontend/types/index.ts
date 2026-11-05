@@ -63,6 +63,13 @@ export interface CreditAssessmentResponse {
   reconciliation_variance?: number | null;
   verification_notes?: string | null;
   requires_manual_review?: boolean;
+  // Immutable assessment hash chain
+  assessment_hash?: string | null;
+  verification_record_hash?: string | null;
+  previous_assessment_hash?: string | null;
+  assessment_version?: number;
+  on_chain_tx_hash?: string | null;
+  on_chain_status?: string;
 }
 
 export interface FeatureImportance {
@@ -162,4 +169,21 @@ export interface AdminVerificationItem {
   record_hash: string | null;
   updated_at: string;
   verifier_notes: string | null;
+}
+
+export interface AssessmentHistoryItem {
+  assessment_id: string;
+  risk_score: number;
+  risk_category: string;
+  confidence: number;
+  model_version: string;
+  created_at: string;
+  verification_status: VerificationStatusType | string | null;
+  assessment_hash: string | null;
+  previous_assessment_hash: string | null;
+  assessment_version: number | null;
+  raw_risk_score: number | null;
+  verification_adjustment: number | null;
+  on_chain_tx_hash: string | null;
+  on_chain_status: string | null;
 }

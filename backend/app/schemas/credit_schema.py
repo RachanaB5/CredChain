@@ -95,6 +95,12 @@ class CreditAssessmentResponse(BaseModel):
     assessment_hash: Optional[str] = Field(default=None, description="0x bytes32 hash committing to this assessment")
     verification_record_hash: Optional[str] = Field(default=None, description="Hash of the verification record used")
 
+    # Immutable version chain
+    previous_assessment_hash: Optional[str] = Field(default=None, description="Hash of the prior assessment version (None if first)")
+    assessment_version: int = Field(default=1, description="Sequential version number for this borrower")
+    on_chain_tx_hash: Optional[str] = Field(default=None, description="Blockchain transaction hash")
+    on_chain_status: str = Field(default="PENDING", description="PENDING / CONFIRMED / FAILED")
+
     model_config = {"from_attributes": True}
 
 
@@ -109,6 +115,12 @@ class CreditHistoryItem(BaseModel):
     created_at: str
     verification_status: Optional[str] = None
     assessment_hash: Optional[str] = None
+    previous_assessment_hash: Optional[str] = None
+    assessment_version: Optional[int] = None
+    raw_risk_score: Optional[float] = None
+    verification_adjustment: Optional[float] = None
+    on_chain_tx_hash: Optional[str] = None
+    on_chain_status: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

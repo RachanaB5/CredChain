@@ -201,6 +201,12 @@ def rescore_wallet(
         "model_version": latest.model_version,
         "assessed_at": now.isoformat(),
     }
+
+    # Determine version chain
+    prev_hash = latest.assessment_hash
+    prev_version = latest.assessment_version or 1
+    new_version = prev_version + 1
+
     new_row = CreditAssessment(
         wallet_address=wallet,
         risk_score=result.final_risk_score,
@@ -216,6 +222,9 @@ def rescore_wallet(
         verification_adjustment=round(result.adjustment, 4),
         assessed_at=record["assessed_at"],
         assessment_hash=compute_assessment_hash(record),
+        previous_assessment_hash=prev_hash,
+        assessment_version=new_version,
+        on_chain_status="PENDING",
         created_at=now,
     )
     db.add(new_row)

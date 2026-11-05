@@ -8,6 +8,7 @@ export const contracts = {
   borrowerReputation: (process.env.NEXT_PUBLIC_BORROWER_REPUTATION_ADDRESS || "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0") as `0x${string}`,
   creditPassportRegistry: (process.env.NEXT_PUBLIC_CREDIT_PASSPORT_REGISTRY_ADDRESS || "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853") as `0x${string}`,
   verificationRegistry: (process.env.NEXT_PUBLIC_VERIFICATION_REGISTRY_ADDRESS || "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6") as `0x${string}`,
+  assessmentRegistry: (process.env.NEXT_PUBLIC_ASSESSMENT_REGISTRY_ADDRESS || "0x8A791620dd6260079BF849Dc5567aDC3F2FdC318") as `0x${string}`,
 } as const;
 
 export const chainConfig = {
