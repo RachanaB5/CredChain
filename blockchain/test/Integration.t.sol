@@ -82,6 +82,8 @@ contract CredChainEndToEndIntegrationTest is Test {
         uint256 duration = 30 days;
         uint256 interestBps = 500; // 5%
         bytes32 aiRiskHash = keccak256("ai-assessment-low-risk-v1");
+        uint256 borrowerBalanceBefore = credToken.balanceOf(borrower);
+        uint256 lenderBalanceBefore = credToken.balanceOf(lender);
 
         // Step 1: Borrower requests loan
         vm.prank(borrower);
@@ -94,6 +96,8 @@ contract CredChainEndToEndIntegrationTest is Test {
         );
 
         assertEq(uint256(loanManager.getLoanStatus(loanId)), uint256(ILoanManager.LoanStatus.REQUESTED));
+        assertEq(credToken.balanceOf(borrower), borrowerBalanceBefore - collateralAmount);
+        assertEq(escrow.getCollateralBalance(loanId), collateralAmount);
 
         // Step 2: Off-chain AI risk assessment hash is verified by governance approver
         vm.prank(approver);
@@ -104,6 +108,9 @@ contract CredChainEndToEndIntegrationTest is Test {
         vm.prank(lender);
         loanManager.activateLoan(loanId);
         assertEq(uint256(loanManager.getLoanStatus(loanId)), uint256(ILoanManager.LoanStatus.ACTIVE));
+        assertEq(credToken.balanceOf(lender), lenderBalanceBefore - loanAmount);
+        assertEq(credToken.balanceOf(borrower), borrowerBalanceBefore - collateralAmount + loanAmount);
+        assertEq(escrow.getLoanFundBalance(loanId), 0);
 
         // Verify reputation record was initiated
         IBorrowerReputation.ReputationRecord memory rec = reputation.getReputation(borrower);
@@ -117,6 +124,11 @@ contract CredChainEndToEndIntegrationTest is Test {
         // Step 5: Loan is now REPAID and reputation score updated to 100
         assertEq(uint256(loanManager.getLoanStatus(loanId)), uint256(ILoanManager.LoanStatus.REPAID));
         assertEq(reputation.getReputationScore(borrower), 100);
+        assertEq(credToken.balanceOf(borrower), borrowerBalanceBefore - (totalOwed - loanAmount));
+        assertEq(credToken.balanceOf(lender), lenderBalanceBefore + (totalOwed - loanAmount));
+        assertEq(escrow.getCollateralBalance(loanId), 0);
+        (,, uint256 repaymentBalance,,) = escrow.getEscrowDetails(loanId);
+        assertEq(repaymentBalance, 0);
     }
 
     /**
@@ -124,12 +136,14 @@ contract CredChainEndToEndIntegrationTest is Test {
      */
     function test_Scenario3_LoanDefaultWorkflow() public {
         uint256 loanAmount = 1000 * 1e18;
+        uint256 collateralAmount = 200 * 1e18;
         uint256 duration = 30 days;
+        uint256 lenderBalanceBefore = credToken.balanceOf(lender);
 
         vm.prank(borrower);
         uint256 loanId = loanManager.requestLoan(
             loanAmount,
-            200 * 1e18,
+            collateralAmount,
             duration,
             500,
             keccak256("ai-hash-default")
@@ -151,6 +165,8 @@ contract CredChainEndToEndIntegrationTest is Test {
         // Mark default succeeds
         loanManager.markDefault(loanId);
         assertEq(uint256(loanManager.getLoanStatus(loanId)), uint256(ILoanManager.LoanStatus.DEFAULTED));
+        assertEq(credToken.balanceOf(lender), lenderBalanceBefore - loanAmount + collateralAmount);
+        assertEq(escrow.getCollateralBalance(loanId), 0);
 
         // Reputation reflects default (0% repaid -> score 0)
         assertEq(reputation.getReputationScore(borrower), 0);

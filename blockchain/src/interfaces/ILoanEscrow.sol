@@ -15,6 +15,7 @@ interface ILoanEscrow {
     event RepaymentReceived(uint256 indexed loanId, address indexed borrower, uint256 amount);
     event RepaymentForwarded(uint256 indexed loanId, address indexed lender, uint256 amount);
 
+    function registerBorrower(uint256 loanId, address borrower) external;
     function depositCollateral(uint256 loanId, address borrower, uint256 amount) external;
     function releaseCollateral(uint256 loanId, address borrower) external;
     function seizeCollateral(uint256 loanId) external;

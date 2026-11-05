@@ -81,16 +81,22 @@ sequenceDiagram
     API-->>Borrower: Risk Score, Category, SHAP Factors, Assessment Hash
     Borrower->>LE: approve(collateralAmount)
     Borrower->>LM: requestLoan(amount, collateral, duration, rate, hash)
+    LM->>LE: registerBorrower(loanId, borrower)
+    LM->>LE: depositCollateral(loanId, borrower, collateral)
     LM->>LM: State = REQUESTED
     Approver->>LM: submitApproval(loanId) via LoanGovernance
     LM->>LM: State = APPROVED
+    Lender->>LE: approve(principal)
     Lender->>LM: activateLoan(loanId)
+    LM->>LE: depositLoanFunds(loanId, lender, principal)
     LM->>LE: disburseLoanFunds(loanId, borrower)
     LM->>BR: recordLoan(borrower, loanId, principal)
     LM->>LM: State = ACTIVE
     Borrower->>LE: approve(totalOwed)
     Borrower->>LM: repayLoan(loanId, totalOwed)
+    LM->>LE: receiveRepayment() and forwardRepaymentToLender()
     LM->>LE: releaseCollateral(loanId, borrower)
     LM->>BR: recordRepayment(borrower, loanId, totalOwed)
     LM->>LM: State = REPAID
+    LM->>LE: seizeCollateral(loanId) if loan defaults
 ```

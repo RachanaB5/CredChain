@@ -35,6 +35,7 @@ contract LoanEscrow is ILoanEscrow, AccessControl, Pausable, ReentrancyGuard {
         uint256 collateral;
         uint256 loanFunds;
         uint256 repaymentBalance;
+        bool collateralDeposited;
         bool collateralReleased;
         bool fundsDisbursed;
         address borrower;
@@ -53,6 +54,12 @@ contract LoanEscrow is ILoanEscrow, AccessControl, Pausable, ReentrancyGuard {
     error NoCollateralDeposited(uint256 loanId);
     error NoFundsDeposited(uint256 loanId);
     error UnauthorizedCaller(address caller);
+    error LoanAlreadyRegistered(uint256 loanId);
+    error LoanNotRegistered(uint256 loanId);
+    error CollateralAlreadyDeposited(uint256 loanId);
+    error FundsAlreadyDeposited(uint256 loanId);
+    error BorrowerMismatch(uint256 loanId, address expected, address actual);
+    error LenderMismatch(uint256 loanId, address expected, address actual);
 
     constructor(address _token, address admin) {
         if (_token == address(0) || admin == address(0)) revert ZeroAddress();
@@ -65,6 +72,23 @@ contract LoanEscrow is ILoanEscrow, AccessControl, Pausable, ReentrancyGuard {
     // ============================
     //  Collateral Management
     // ============================
+
+    /**
+     * @notice Bind an escrow account to its borrower before collateral or funding
+     * @dev Also supports loans with zero collateral, where no deposit would otherwise record the borrower.
+     */
+    function registerBorrower(uint256 loanId, address borrower)
+        external
+        onlyRole(OPERATOR_ROLE)
+        whenNotPaused
+    {
+        if (borrower == address(0)) revert ZeroAddress();
+
+        EscrowAccount storage account = _accounts[loanId];
+        if (account.borrower != address(0)) revert LoanAlreadyRegistered(loanId);
+
+        account.borrower = borrower;
+    }
 
     /**
      * @notice Deposit collateral for a loan
@@ -83,9 +107,14 @@ contract LoanEscrow is ILoanEscrow, AccessControl, Pausable, ReentrancyGuard {
         if (borrower == address(0)) revert ZeroAddress();
 
         EscrowAccount storage account = _accounts[loanId];
-        account.borrower = borrower;
+        if (account.borrower != borrower) {
+            revert BorrowerMismatch(loanId, account.borrower, borrower);
+        }
+        if (account.collateralDeposited) revert CollateralAlreadyDeposited(loanId);
+        if (account.collateralReleased) revert CollateralAlreadyReleased(loanId);
 
         // Effects
+        account.collateralDeposited = true;
         account.collateral += amount;
 
         // Interactions
@@ -106,6 +135,10 @@ contract LoanEscrow is ILoanEscrow, AccessControl, Pausable, ReentrancyGuard {
         nonReentrant
     {
         EscrowAccount storage account = _accounts[loanId];
+        if (borrower == address(0)) revert ZeroAddress();
+        if (account.borrower != borrower) {
+            revert BorrowerMismatch(loanId, account.borrower, borrower);
+        }
         if (account.collateralReleased) revert CollateralAlreadyReleased(loanId);
         if (account.collateral == 0) revert NoCollateralDeposited(loanId);
 
@@ -135,6 +168,9 @@ contract LoanEscrow is ILoanEscrow, AccessControl, Pausable, ReentrancyGuard {
         EscrowAccount storage account = _accounts[loanId];
         if (account.collateralReleased) revert CollateralAlreadyReleased(loanId);
         if (account.collateral == 0) revert NoCollateralDeposited(loanId);
+        if (!account.fundsDisbursed || account.lender == address(0)) {
+            revert NoFundsDeposited(loanId);
+        }
 
         uint256 amount = account.collateral;
         address lender = account.lender;
@@ -143,10 +179,7 @@ contract LoanEscrow is ILoanEscrow, AccessControl, Pausable, ReentrancyGuard {
         account.collateral = 0;
         account.collateralReleased = true;
 
-        // Transfer seized collateral to lender if set, otherwise hold
-        if (lender != address(0)) {
-            token.safeTransfer(lender, amount);
-        }
+        token.safeTransfer(lender, amount);
 
         emit CollateralSeized(loanId, amount);
     }
@@ -171,6 +204,8 @@ contract LoanEscrow is ILoanEscrow, AccessControl, Pausable, ReentrancyGuard {
         if (lender == address(0)) revert ZeroAddress();
 
         EscrowAccount storage account = _accounts[loanId];
+        if (account.borrower == address(0)) revert LoanNotRegistered(loanId);
+        if (account.lender != address(0) || account.fundsDisbursed) revert FundsAlreadyDeposited(loanId);
         account.lender = lender;
 
         // Effects
@@ -194,6 +229,11 @@ contract LoanEscrow is ILoanEscrow, AccessControl, Pausable, ReentrancyGuard {
         nonReentrant
     {
         EscrowAccount storage account = _accounts[loanId];
+        if (borrower == address(0)) revert ZeroAddress();
+        if (account.borrower != borrower) {
+            revert BorrowerMismatch(loanId, account.borrower, borrower);
+        }
+        if (account.lender == address(0)) revert NoFundsDeposited(loanId);
         if (account.fundsDisbursed) revert FundsAlreadyDisbursed(loanId);
         if (account.loanFunds == 0) revert NoFundsDeposited(loanId);
 
@@ -228,6 +268,11 @@ contract LoanEscrow is ILoanEscrow, AccessControl, Pausable, ReentrancyGuard {
         if (amount == 0) revert ZeroAmount();
 
         EscrowAccount storage account = _accounts[loanId];
+        if (borrower == address(0)) revert ZeroAddress();
+        if (account.borrower != borrower) {
+            revert BorrowerMismatch(loanId, account.borrower, borrower);
+        }
+        if (!account.fundsDisbursed) revert NoFundsDeposited(loanId);
 
         // Effects
         account.repaymentBalance += amount;
@@ -251,6 +296,11 @@ contract LoanEscrow is ILoanEscrow, AccessControl, Pausable, ReentrancyGuard {
         nonReentrant
     {
         EscrowAccount storage account = _accounts[loanId];
+        if (lender == address(0)) revert ZeroAddress();
+        if (account.lender != lender) {
+            revert LenderMismatch(loanId, account.lender, lender);
+        }
+        if (amount == 0) revert ZeroAmount();
         if (amount > account.repaymentBalance) {
             revert InsufficientBalance(account.repaymentBalance, amount);
         }
