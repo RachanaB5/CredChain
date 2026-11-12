@@ -23,8 +23,22 @@ class ModelNotLoadedError(Exception):
     """Raised when prediction is attempted before the model is loaded."""
 
 
+def _train_default_model() -> bool:
+    """Rebuild the serialized model artifacts when the checkpoints are missing or incompatible."""
+    try:
+        from app.ml.train import train_model
+
+        logger.warning("Attempting to regenerate incompatible or missing ML artifacts...")
+        train_model()
+        logger.info("ML artifacts regenerated successfully.")
+        return True
+    except Exception as exc:  # pragma: no cover - fallback exception path
+        logger.exception("Failed to regenerate ML model artifacts: %s", exc)
+        return False
+
+
 def load_model() -> bool:
-    """Load model artifacts from disk.  Returns True on success."""
+    """Load model artifacts from disk. Rebuild them automatically if they are missing or stale."""
     global _model, _scaler, _feature_names, _metadata
 
     model_path = ARTIFACTS_DIR / "model.pkl"
@@ -44,10 +58,12 @@ def load_model() -> bool:
         logger.info("ML model loaded successfully (version %s)", _metadata.get("version"))
         return True
     except FileNotFoundError as exc:
-        logger.warning("Model artifacts not found at %s — run train.py first. (%s)", ARTIFACTS_DIR, exc)
-        return False
+        logger.warning("Model artifacts not found at %s — generating a fresh model. (%s)", ARTIFACTS_DIR, exc)
+        return _train_default_model() and load_model()
     except Exception as exc:
         logger.error("Failed to load model artifacts: %s", exc)
+        if _train_default_model():
+            return load_model()
         return False
 
 

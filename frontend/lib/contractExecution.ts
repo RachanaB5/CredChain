@@ -1,4 +1,4 @@
-import { createWalletClient, http, custom } from "viem";
+import { createWalletClient, createPublicClient, http, custom } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { anvil, ganache } from "@/config/web3";
 import { chainConfig } from "@/config/contracts";
@@ -45,6 +45,7 @@ export function getLocalRpcUrl(): string {
  * Executes a smart contract write transaction.
  * In the browser, transactions ALWAYS prompt and execute through the user's MetaMask extension.
  * If MetaMask is not installed or user rejects, it raises a clear error rather than silently signing.
+ * Transactions are awaited with waitForTransactionReceipt so callers never receive unconfirmed state.
  */
 export async function executeContractWithFallback({
   params,
@@ -57,44 +58,14 @@ export async function executeContractWithFallback({
   isConnected?: boolean;
   writeContractAsync?: (args: any) => Promise<`0x${string}`>;
 }): Promise<`0x${string}`> {
+  const activeChain = (chainConfig.chainId === 1337 || chainConfig.chainId === 5777) ? ganache : anvil;
+  const publicClient = createPublicClient({
+    chain: activeChain,
+    transport: http(getLocalRpcUrl()),
+  });
+
   // If running in browser window, strictly require MetaMask wallet confirmation
   if (typeof window !== "undefined") {
-    // 1. If Wagmi connector is already connected and ready, use writeContractAsync
-    if (isConnected && writeContractAsync) {
-      try {
-        const hash = await writeContractAsync({
-          address: params.address,
-          abi: params.abi,
-          functionName: params.functionName,
-          args: params.args,
-          value: params.value,
-        });
-        return hash;
-      } catch (err: any) {
-        const msg = String(err?.message || "");
-        // If user cancelled in MetaMask
-        if (
-          msg.includes("User rejected") ||
-          msg.includes("user rejected") ||
-          err?.code === 4001 ||
-          err?.name === "UserRejectedRequestError"
-        ) {
-          throw new Error("Transaction was cancelled in MetaMask.");
-        }
-
-        const isConnectorError =
-          msg.includes("Connector not connected") ||
-          msg.includes("ConnectorNotConnectedError") ||
-          err?.name === "ConnectorNotConnectedError";
-
-        if (!isConnectorError) {
-          throw err;
-        }
-        console.warn("Wagmi connector not active, falling back to direct window.ethereum MetaMask prompt...");
-      }
-    }
-
-    // 2. Direct browser MetaMask provider (window.ethereum)
     const ethereum = (window as any).ethereum;
     if (!ethereum) {
       throw new Error(
@@ -138,20 +109,48 @@ export async function executeContractWithFallback({
         }
       }
 
+      // Fetch the true on-chain pending nonce so MetaMask never sends a desynced/stale nonce
+      let onChainNonce: number | undefined;
+      try {
+        onChainNonce = await publicClient.getTransactionCount({
+          address: userAccount,
+          blockTag: "pending",
+        });
+      } catch (nonceErr) {
+        console.warn("Could not fetch on-chain nonce:", nonceErr);
+      }
+
       const client = createWalletClient({
         account: userAccount,
-        chain: (chainConfig.chainId === 1337 || chainConfig.chainId === 5777) ? ganache : anvil,
+        chain: activeChain,
         transport: custom(ethereum),
       });
 
-      // Directly prompts MetaMask confirmation modal!
+      // Directly prompts MetaMask confirmation modal with explicit on-chain nonce!
       const hash = await client.writeContract({
         address: params.address,
         abi: params.abi,
         functionName: params.functionName,
         args: params.args as any,
         value: params.value,
+        ...(onChainNonce !== undefined ? { nonce: onChainNonce } : {}),
       });
+
+      // Wait for transaction to be mined into a block so subsequent reads and steps never stall
+      try {
+        const receipt = await publicClient.waitForTransactionReceipt({
+          hash,
+          timeout: 15_000,
+        });
+        if (receipt.status === "reverted") {
+          throw new Error("Transaction execution was reverted on-chain.");
+        }
+      } catch (waitErr: any) {
+        if (waitErr?.message?.includes("reverted")) {
+          throw waitErr;
+        }
+        console.warn("Transaction submitted, receipt wait timed out:", waitErr);
+      }
 
       return hash;
     } catch (err: any) {
@@ -173,11 +172,10 @@ export async function executeContractWithFallback({
   const rpcUrl = getLocalRpcUrl();
   const accountInfo = ANVIL_ACCOUNTS[role] || ANVIL_ACCOUNTS.admin;
   const account = privateKeyToAccount(accountInfo.privateKey);
-  const chain = (chainConfig.chainId === 1337 || chainConfig.chainId === 5777) ? ganache : anvil;
 
   const client = createWalletClient({
     account,
-    chain,
+    chain: activeChain,
     transport: http(rpcUrl),
   });
 
@@ -189,6 +187,16 @@ export async function executeContractWithFallback({
       args: params.args as any,
       value: params.value,
     });
+
+    try {
+      await publicClient.waitForTransactionReceipt({
+        hash,
+        timeout: 15_000,
+      });
+    } catch (receiptErr) {
+      console.warn("Headless receipt wait:", receiptErr);
+    }
+
     return hash;
   } catch (err: any) {
     const msg = String(err?.message || "");
